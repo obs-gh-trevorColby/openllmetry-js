@@ -5,7 +5,7 @@ import {
   Span,
   ReadableSpan,
 } from "@opentelemetry/sdk-trace-node";
-import { context } from "@opentelemetry/api";
+import { context, diag } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import {
@@ -272,46 +272,58 @@ const onSpanEnd = (
   instrumentationLibraries?: string[],
 ) => {
   return (span: ReadableSpan): void => {
-    if (
-      instrumentationLibraries &&
-      !instrumentationLibraries.includes(
-        (span as any).instrumentationScope?.name ||
-          (span as any).instrumentationLibrary?.name,
-      )
-    ) {
-      return;
+    try {
+      if (
+        instrumentationLibraries &&
+        !instrumentationLibraries.includes(
+          (span as any).instrumentationScope?.name ||
+            (span as any).instrumentationLibrary?.name,
+        )
+      ) {
+        return;
+      }
+
+      transformAiSdkSpanAttributes(span);
+
+      const spanId = span.spanContext().spanId;
+      const parentSpanId = span.parentSpanContext?.spanId;
+      let agentName = span.attributes[ATTR_GEN_AI_AGENT_NAME];
+
+      if (agentName && typeof agentName === "string") {
+        spanAgentNames.set(spanId, {
+          agentName,
+          timestamp: Date.now(),
+        });
+      } else if (
+        parentSpanId &&
+        parentSpanId !== "0000000000000000" &&
+        spanAgentNames.has(parentSpanId)
+      ) {
+        agentName = spanAgentNames.get(parentSpanId)!.agentName;
+        span.attributes[ATTR_GEN_AI_AGENT_NAME] = agentName;
+        spanAgentNames.set(spanId, {
+          agentName,
+          timestamp: Date.now(),
+        });
+      }
+
+      if (Math.random() < 0.01) {
+        cleanupExpiredSpanAgentNames();
+      }
+
+      const compatibleSpan = ensureSpanCompatibility(span);
+
+      originalOnEnd(compatibleSpan);
+    } catch (e) {
+      diag.error(
+        "@traceloop/node-server-sdk: error in onSpanEnd processing",
+        e,
+      );
+      try {
+        originalOnEnd(span);
+      } catch (_) {
+        // swallow -- nothing more we can do
+      }
     }
-
-    transformAiSdkSpanAttributes(span);
-
-    const spanId = span.spanContext().spanId;
-    const parentSpanId = span.parentSpanContext?.spanId;
-    let agentName = span.attributes[ATTR_GEN_AI_AGENT_NAME];
-
-    if (agentName && typeof agentName === "string") {
-      spanAgentNames.set(spanId, {
-        agentName,
-        timestamp: Date.now(),
-      });
-    } else if (
-      parentSpanId &&
-      parentSpanId !== "0000000000000000" &&
-      spanAgentNames.has(parentSpanId)
-    ) {
-      agentName = spanAgentNames.get(parentSpanId)!.agentName;
-      span.attributes[ATTR_GEN_AI_AGENT_NAME] = agentName;
-      spanAgentNames.set(spanId, {
-        agentName,
-        timestamp: Date.now(),
-      });
-    }
-
-    if (Math.random() < 0.01) {
-      cleanupExpiredSpanAgentNames();
-    }
-
-    const compatibleSpan = ensureSpanCompatibility(span);
-
-    originalOnEnd(compatibleSpan);
   };
 };
